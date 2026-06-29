@@ -9,7 +9,12 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as opt
 
-from tasks import generate_retrieval_batch, generate_addition_batch, generate_dyck_batch
+from tasks import (
+    generate_retrieval_batch,
+    generate_addition_batch,
+    generate_dyck_batch,
+    generate_selective_copy_batch,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -20,17 +25,25 @@ _TASK_GENERATORS = {
     "retrieval": generate_retrieval_batch,
     "addition": generate_addition_batch,
     "dyck": generate_dyck_batch,
+    "selective_copy": generate_selective_copy_batch,
 }
 
-# vocab_size for retrieval task
-_RETRIEVAL_VOCAB_SIZE = 256
+# Tasks that need vocab_size passed to the generator
+_VOCAB_TASKS = {"retrieval", "selective_copy"}
+
+# Default vocab sizes for vocab-aware tasks
+_DEFAULT_VOCAB_SIZES = {
+    "retrieval": 256,
+    "selective_copy": 64,
+}
 
 
 def _get_batch(task_name, batch_size, seq_len):
     """Generate a fresh (x, y) data batch for a given task."""
     gen = _TASK_GENERATORS[task_name]
-    if task_name == "retrieval":
-        return gen(batch_size, seq_len, _RETRIEVAL_VOCAB_SIZE)
+    if task_name in _VOCAB_TASKS:
+        vocab_size = _DEFAULT_VOCAB_SIZES[task_name]
+        return gen(batch_size, seq_len, vocab_size)
     else:
         return gen(batch_size, seq_len)
 
@@ -38,6 +51,7 @@ def _get_batch(task_name, batch_size, seq_len):
 # ---------------------------------------------------------------------------
 # Loss function
 # ---------------------------------------------------------------------------
+
 
 def _cross_entropy_loss(logits, targets):
     """
@@ -73,6 +87,7 @@ def _cross_entropy_loss(logits, targets):
 # Accuracy helper
 # ---------------------------------------------------------------------------
 
+
 def _compute_accuracy(logits, targets):
     """
     Compute token-level accuracy ignoring padding.
@@ -95,13 +110,14 @@ def _compute_accuracy(logits, targets):
 # Evaluation
 # ---------------------------------------------------------------------------
 
+
 def evaluate_model(model, task_name, num_batches=10, batch_size=32, seq_len=128):
     """
     Evaluate a model on a task over multiple batches.
 
     Args:
         model:       MLX module (e.g. Mamba model).
-        task_name:   One of {'retrieval', 'addition', 'dyck'}.
+        task_name:   One of {'retrieval', 'addition', 'dyck', 'selective_copy'}.
         num_batches: Number of fresh batches to average over.
         batch_size:  Batch size.
         seq_len:     Maximum sequence length.
@@ -134,6 +150,7 @@ def evaluate_model(model, task_name, num_batches=10, batch_size=32, seq_len=128)
 # Model-aware loss wrapper (needed for nn.value_and_grad)
 # ---------------------------------------------------------------------------
 
+
 def _model_loss(model, x, y):
     """Forward pass + cross-entropy loss, for use with nn.value_and_grad."""
     logits = model(x)
@@ -143,6 +160,7 @@ def _model_loss(model, x, y):
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
+
 
 def train_model(
     model,
@@ -161,9 +179,9 @@ def train_model(
 
     Args:
         model:      MLX module to train.
-        task_name:  One of {'retrieval', 'addition', 'dyck'}.
+        task_name:  One of {'retrieval', 'addition', 'dyck', 'selective_copy'}.
         batch_size: Number of sequences per batch.
-        seq_len:    Maximum sequence length (padding / truncation).
+        seq_len:    Maximum sequence length.
         n_steps:    Total training steps.
         eval_every: Interval (in steps) between evaluations and logging.
         lr:         Learning rate for AdamW.

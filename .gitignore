@@ -3,3 +3,4 @@ __pycache__/
 results.json
 .DS_Store
 *.npy
+run_output.log

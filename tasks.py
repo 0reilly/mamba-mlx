@@ -1,10 +1,12 @@
 """
 Task generators for the Mamba experiment.
 
-Three synthetic tasks:
+Four synthetic tasks:
 1. Retrieval — find the token following the first occurrence of a query token.
 2. Addition   — given pairs (a_i, b_i, =, c_i), predict the sum digit(s).
 3. Dyck-1     — predict the next character in a Dyck-1 (parentheses) string.
+4. Selective Copying — memorize tokens interspersed with noise, reproduce in order.
+   (Mamba paper Section 4.1 — the definitive test of the selective mechanism)
 
 All functions return MLX arrays (mlx.core, imported as mx). No numpy.
 """
@@ -205,3 +207,98 @@ def generate_dyck_batch(batch_size, seq_len):
         targets[b] = mx.array(tgt, dtype=mx.int32)
 
     return inputs, targets
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Task 4: Selective Copying (Mamba paper, Section 4.1)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The model must memorize specific tokens interspersed among noise tokens,
+# then reproduce them in order after a marker sequence.
+#
+# This is THE canonical test of the selective mechanism: fixed SSMs (S4/DSS)
+# cannot solve this task because all tokens contribute equally to the state.
+# Mamba's Δ(x), B(x), C(x) allow it to selectively memorize — amplifying
+# relevant tokens while suppressing noise.
+#
+# Sequence layout (total = seq_len):
+#
+#   [  noise region with M tokens randomly placed  |  M markers  |  M recall ]
+#            length: seq_len - 2M                    length: M     length: M
+#
+# Loss is computed ONLY on the recall portion (model must output memorized
+# tokens in original order).  The noise + marker region uses -100 masking.
+#
+# Special token assignments (within vocab_size):
+#   NOISE  = 0               blank/noise
+#   MARKER = vocab_size - 1  separator
+#   Memory tokens draw from [1, vocab_size-2].
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def generate_selective_copy_batch(batch_size, seq_len, vocab_size):
+    """
+    Generate a batch for the Selective Copying task.
+
+    Args:
+        batch_size: Number of sequences.
+        seq_len:    Total sequence length.
+        vocab_size: Number of distinct tokens (>= 3).
+
+    Returns:
+        x: mx.array (B, L) — input token ids.
+        y: mx.array (B, L) — target ids (-100 where loss is ignored).
+    """
+    if vocab_size < 3:
+        raise ValueError(f"vocab_size must be >= 3 for selective copying, got {vocab_size}")
+
+    B = batch_size
+    L = seq_len
+
+    # Special token ids
+    NOISE  = 0               # blank/noise
+    MARKER = vocab_size - 1  # separator marking recall phase
+
+    # Number of tokens to memorize
+    M = min(max(2, L // 8), 8)
+    noise_region_size = L - 2 * M
+    if noise_region_size < M:
+        M = max(1, L // 3)
+        noise_region_size = L - 2 * M
+
+    # ---- Memorized tokens (drawn from [1, vocab_size-2]) ----
+    mem_tokens = mx.random.randint(1, vocab_size - 1, (B, M))
+
+    marker_start = noise_region_size
+    recall_start = marker_start + M
+
+    # ---- Build input x (Python lists, then convert) ----
+    rng = _rng()
+    x_rows = []
+    for b in range(B):
+        row = [NOISE] * L
+        # Scatter M tokens at random sorted positions in noise region
+        positions = sorted(rng.sample(range(noise_region_size), M))
+        for m, pos in enumerate(positions):
+            row[pos] = int(mem_tokens[b, m].item())
+        # M markers
+        for m in range(M):
+            row[marker_start + m] = MARKER
+        # M recall tokens (teacher forcing)
+        for m in range(M):
+            row[recall_start + m] = int(mem_tokens[b, m].item())
+        x_rows.append(row)
+    x = mx.array(x_rows, dtype=mx.int32)
+
+    # ---- Build target y (next-token prediction, masked) ----
+    # -100 everywhere; only loss on recall phase
+    y_rows = []
+    for b in range(B):
+        row = [-100] * L
+        for t in range(marker_start, min(recall_start + M, L)):
+            if t + 1 < L:
+                row[t] = x_rows[b][t + 1]
+        y_rows.append(row)
+    y = mx.array(y_rows, dtype=mx.int32)
+
+    return x, y
